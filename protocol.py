@@ -1,0 +1,12 @@
+# protocol.py
+
+CMD_MSG = "MSG"
+CMD_CLIENTS = "CLIENTS"
+
+CMD_ACK = "ACK"
+CMD_NACK = "NACK"
+CMD_SAVE = "SAVE"
+
+CMD_NEW = "NEW"
+CMD_ACTIVE = "ACTIVE"
+CMD_ALL = "ALL"
