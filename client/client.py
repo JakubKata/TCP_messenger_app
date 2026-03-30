@@ -21,8 +21,10 @@ def receive_messages(client_socket):
         if command == "ACK":
             if parts[1] == "ACK":
                 print("Message sent successfully.")
+            elif parts[1] == "SAVE":
+                print("The destination client is offline. The message will be saved and delivered when the client comes online.")
             elif parts[1] == "NACK":
-                print("Failed to send the message. The destination client is not active.")
+                print("Failed to send the message. The destination client is not existing.")
         elif command == "MSG":
             print(f"Message from id:{parts[1]} name:{parts[2]}: {parts[3]}")
         else:    
@@ -32,7 +34,10 @@ def send_message(client_socket):
     while True:
         destination_id = input("Enter the destination client ID (or 'ACTIVE' to see active clients): ")
         if destination_id == "ACTIVE":
-            client_socket.send("ACTIVE".encode())
+            client_socket.send("ClIENTS|ACTIVE".encode())
+            continue
+        if destination_id == "ALL":
+            client_socket.send("CLIENTS|ALL".encode())
             continue
         message = input("Enter your message: ")
         client_socket.send(f"MSG|{destination_id}|{message}".encode())
