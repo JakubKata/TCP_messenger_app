@@ -1,4 +1,5 @@
 import socket
+import ssl
 import threading
 import json
 import os
@@ -15,6 +16,10 @@ key = os.getenv("SECRET_KEY")
 #.jsom
 with open("config.json", "r",encoding="utf-8") as f:
     config = json.load(f)
+
+#tls
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(certfile="server.crt", keyfile="server.key")
 
 init_db()
 active_clients = {} #active_client = {client_id : [client_socket, client_address, name, password]}
@@ -119,12 +124,19 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
     server_socket.listen()
 
     print(f"server is listening to {ip}:{port}...")
-        
+     
     while True:
         client_socket, client_address = server_socket.accept()
 
-        if len(active_clients) >= int(config["MAX_CLIENTS"]):
-            client_socket.send("server is full".encode())
+        try:
+            secure_socket = context.wrap_socket(client_socket, server_side=True)
+        except ssl.SSLError:
             client_socket.close()
             continue
-        threading.Thread(target=handle_client, args=(client_socket, client_address)).start()
+
+        if len(active_clients) >= int(config["MAX_CLIENTS"]):
+            secure_socket.send("server is full".encode())
+            secure_socket.close()
+            continue
+        
+        threading.Thread(target=handle_client, args=(secure_socket, client_address)).start()

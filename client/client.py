@@ -1,4 +1,5 @@
 import socket
+import ssl
 import threading
 import os
 from dotenv import load_dotenv
@@ -9,6 +10,12 @@ load_dotenv()
 ip = os.getenv("SERVER_IP")
 port = int(os.getenv("SERVER_PORT"))
 key = os.getenv("SECRET_KEY")
+
+#tls
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+context.load_verify_locations("server.crt")
+context.check_hostname = False 
+
 
 #functions
 def receive_messages(client_socket):
@@ -77,10 +84,12 @@ def authenticate(client_socket):
             
 while True:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-        client_socket.connect((ip, port))
 
-        if authenticate(client_socket):            
-            threading.Thread(target=receive_messages, args=(client_socket,), daemon=True).start()
-            send_message(client_socket)
+        secure_socket = context.wrap_socket(client_socket, server_hostname=ip)
+        secure_socket.connect((ip, port))
+
+        if authenticate(secure_socket):            
+            threading.Thread(target=receive_messages, args=(secure_socket,), daemon=True).start()
+            send_message(secure_socket)
         else:
-            client_socket.close()
+            secure_socket.close()
