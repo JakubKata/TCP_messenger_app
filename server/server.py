@@ -85,7 +85,7 @@ def do_get_key(client_socket, parts):
     if public_key != None:
         client_socket.send(f"{CMD_PUBKEY}|{target_id}|{public_key}\n".encode())
     else:
-        client_socket.send(f"{CMD_NACK}\n".encode())
+        client_socket.send(f"{CMD_ACK}|{CMD_NACK}\n".encode())
 
 def do_message(client_socket, client_id, parts):
     destination_id = parts[1]
