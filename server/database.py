@@ -10,6 +10,7 @@ def init_db():
             client_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             password TEXT NOT NULL,
+            public_key TEXT,
             offline_messages TEXT
         )""")
     conn.commit()
@@ -35,6 +36,24 @@ def is_existing_client(client_id):
         return False
     else:
         return True
+    
+def update_public_key(client_id, pubkey):
+    conn = sqlite3.connect("clients.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET public_key = ? WHERE client_id = ?", (pubkey, client_id))
+    conn.commit()
+    conn.close()
+
+def get_public_key(client_id):
+    conn = sqlite3.connect("clients.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT public_key FROM users WHERE client_id = ?", (client_id,))
+    result = cursor.fetchone()
+    conn.close()
+    if result == None:
+        return None
+    else:
+        return result[0]
 
 def offline_message_read(client_id):
     conn = sqlite3.connect("clients.db")
@@ -44,13 +63,20 @@ def offline_message_read(client_id):
     cursor.execute("UPDATE users SET offline_messages = NULL WHERE client_id = ?", (client_id,))
     conn.commit()
     conn.close()
-    return result
+    if result == None:
+        return None
+    else:
+        return result[0]
 
 def offline_message_save(destination_id, client_id, sender_name, message):
     conn = sqlite3.connect("clients.db")
     cursor = conn.cursor()
     cursor.execute("SELECT offline_messages FROM users WHERE client_id = ?", (destination_id,))
     result = cursor.fetchone()
+    if result == None:
+        conn.commit()
+        conn.close()
+        return
     if result[0] == None:
         new_offline_message = f"{CMD_MSG}|{client_id}|{sender_name}|{message}\n"
     else:

@@ -3,8 +3,8 @@ import ssl
 import threading
 import json
 import os
-from database import init_db, get_client, new_client, offline_message_save, offline_message_read, is_existing_client, get_all_clients
-from protocol import CMD_MSG, CMD_CLIENTS, CMD_ACK, CMD_NACK, CMD_SAVE, CMD_NEW, CMD_ACTIVE, CMD_ALL
+from database import init_db, get_client, new_client, offline_message_save, offline_message_read, is_existing_client, get_all_clients, update_public_key, get_public_key
+from protocol import CMD_MSG, CMD_CLIENTS, CMD_ACK, CMD_NACK, CMD_SAVE, CMD_NEW, CMD_ACTIVE, CMD_ALL, CMD_PUBKEY, CMD_GETKEY
 from dotenv import load_dotenv
 
 #.env
@@ -66,6 +66,41 @@ def authenticate(client_socket, client_address, client_id):
         client_socket.send(f"{CMD_NACK}\n".encode())
         client_socket.close()
         return False
+def do_clients(client_socket, parts):
+    if parts[1] == CMD_ACTIVE:
+        clients_text = get_active_clients()
+        client_socket.send(f"{clients_text}\n".encode())
+    elif parts[1] == CMD_ALL:
+        clients_text = get_all_clients()
+        client_socket.send(f"{clients_text}\n".encode())
+
+def do_public_key(client_socket, client_id, parts):
+    public_key = parts[1]
+    update_public_key(client_id, public_key)
+    client_socket.send(f"{CMD_ACK}\n".encode())
+
+def do_get_key(client_socket, parts):
+    target_id = parts[1]
+    public_key = get_public_key(target_id)
+    if public_key != None:
+        client_socket.send(f"{CMD_PUBKEY}|{target_id}|{public_key}\n".encode())
+    else:
+        client_socket.send(f"{CMD_NACK}\n".encode())
+
+def do_message(client_socket, client_id, parts):
+    destination_id = parts[1]
+    message = parts[2]
+    sender_name = active_clients[client_id][2]
+    if destination_id in active_clients:
+        active_clients[destination_id][0].send(f"{CMD_MSG}|{client_id}|{sender_name}|{message}\n".encode())
+        client_socket.send(f"{CMD_ACK}|{CMD_ACK}\n".encode())
+    else:
+        if is_existing_client(destination_id):
+            client_socket.send(f"{CMD_ACK}|{CMD_SAVE}\n".encode())
+            sender_name = active_clients[client_id][2]
+            offline_message_save(destination_id, client_id, sender_name, message)
+        else:                       
+            client_socket.send(f"{CMD_ACK}|{CMD_NACK}\n".encode())
 
 def handle_client(client_socket, client_address):
     
@@ -76,11 +111,11 @@ def handle_client(client_socket, client_address):
         return
 
     offline_data = offline_message_read(client_id)
-    if offline_data[0] != None:
-        client_socket.send(offline_data[0].encode())
+    if offline_data != None:
+        client_socket.send(offline_data.encode())
 
     while True:
-        data = client_socket.recv(4096).decode()
+        data = client_socket.recv(8192).decode()
         if not data:
             break
 
@@ -92,27 +127,20 @@ def handle_client(client_socket, client_address):
             parts = response.split("|")
             command = parts[0]
             if command == CMD_CLIENTS:
-                if parts[1] == CMD_ACTIVE:
-                    clients_text = get_active_clients()
-                    client_socket.send(f"{clients_text}\n".encode())
-                elif parts[1] == CMD_ALL:
-                    clients_text = get_all_clients()
-                    client_socket.send(f"{clients_text}\n".encode())
+                do_clients(client_socket, parts)
                 continue
+            
+            if command == CMD_PUBKEY:
+                do_public_key(client_socket, client_id, parts)
+                continue
+
+            if command == CMD_GETKEY:
+                do_get_key(client_socket, parts)
+                continue
+
             if command == CMD_MSG:
-                destination_id = parts[1]
-                message = parts[2]
-                sender_name = active_clients[client_id][2]
-                if destination_id in active_clients:
-                    active_clients[destination_id][0].send(f"{CMD_MSG}|{client_id}|{sender_name}|{message}\n".encode())
-                    client_socket.send(f"{CMD_ACK}|{CMD_ACK}\n".encode())
-                else:
-                    if is_existing_client(destination_id):
-                        client_socket.send(f"{CMD_ACK}|{CMD_SAVE}\n".encode())
-                        sender_name = active_clients[client_id][2]
-                        offline_message_save(destination_id, client_id, sender_name, message)
-                    else:                       
-                        client_socket.send(f"{CMD_ACK}|{CMD_NACK}\n".encode())
+                do_message(client_socket, client_id, parts)
+                continue
                         
     active_clients.pop(client_id, None)
     client_socket.close()
@@ -135,7 +163,6 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
             continue
 
         if len(active_clients) >= int(config["MAX_CLIENTS"]):
-            secure_socket.send("server is full".encode())
             secure_socket.close()
             continue
         
