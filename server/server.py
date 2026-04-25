@@ -4,7 +4,7 @@ import threading
 import json
 import os
 from database import init_db, get_client, new_client, offline_message_save, offline_message_read, is_existing_client, get_all_clients, update_public_key, get_public_key
-from protocol import CMD_MSG, CMD_CLIENTS, CMD_ACK, CMD_NACK, CMD_SAVE, CMD_NEW, CMD_ACTIVE, CMD_ALL, CMD_PUBKEY, CMD_GETKEY, CMD_KEY
+from protocol import CMD_MSG, CMD_CLIENTS, CMD_ACK, CMD_NACK, CMD_SAVE, CMD_NEW, CMD_EXISTING, CMD_BUSY, CMD_ACTIVE, CMD_ALL, CMD_PUBKEY, CMD_GETKEY, CMD_KEY
 from dotenv import load_dotenv
 
 #.env
@@ -34,38 +34,59 @@ def authenticate_key(client_socket, client_address):
     client_key = client_socket.recv(1024).decode().strip()
     if client_key != key:
         client_socket.send(f"{CMD_NACK}\n".encode())
-        client_socket.close()
         return False
     else:
         client_socket.send(f"{CMD_ACK}\n".encode())
         return True
        
-def authenticate(client_socket, client_address, client_id):   
-    if is_existing_client(client_id):
-        client = get_client(client_id)
-        active_clients[client_id] = [client_socket, client_address, *client] #active_client = {client_id : [client_socket, client_address, name, password]}
-        name = active_clients[client_id][2]
-        password = active_clients[client_id][3]
-        client_socket.send(f"{CMD_ACK}\n".encode())
-        client_password = client_socket.recv(1024).decode().strip()
-    else:
-        client_socket.send(f"{CMD_NEW}\n".encode())
-        response = client_socket.recv(1024).decode().strip()
-        if not response or "|" not in response:
-            client_socket.close()
+def authenticate(client_socket, client_address):
+    while True:
+        mode = client_socket.recv(1024).decode().strip()
+        if mode == CMD_NEW:
+            client_id = client_socket.recv(1024).decode().strip()
+            if not client_id:
+                client_socket.send(f"{CMD_NACK}\n".encode())
+                return False
+
+            if is_existing_client(client_id):
+                client_socket.send(f"{CMD_BUSY}\n".encode())
+                continue
+            else:
+                client_socket.send(f"{CMD_ACK}\n".encode())
+                response = client_socket.recv(1024).decode().strip()
+                if not response or "|" not in response:
+                    return False
+                name, password = response.split("|", 1)
+                new_client(client_id, name, password)
+                active_clients[client_id] = [client_socket, client_address, name, password] #active_client = {client_id : [client_socket, client_address, name, password]}
+                client_socket.send(f"{CMD_ACK}\n".encode())
+                return client_id
+            
+        elif mode == CMD_EXISTING:
+            response = client_socket.recv(1024).decode().strip()
+            if not response or "|" not in response:
+                client_socket.send(f"{CMD_NACK}\n".encode())
+                continue
+
+            client_id, client_password = response.split("|", 1)
+            if not is_existing_client(client_id):
+                client_socket.send(f"{CMD_NACK}\n".encode())
+                continue
+
+            client = get_client(client_id)
+            password = client[1]
+            if password != client_password:
+                client_socket.send(f"{CMD_NACK}\n".encode())
+                continue
+
+            active_clients[client_id] = [client_socket, client_address, *client] #active_client = {client_id : [client_socket, client_address, name, password]}
+            name = active_clients[client_id][2]
+            client_socket.send(f"{CMD_ACK}|{name}\n".encode()) 
+            return client_id
+        else:
+            client_socket.send(f"{CMD_NACK}\n".encode())
             return False
-        name, password = response.split("|")
-        active_clients[client_id] = [client_socket, client_address, name, password] #active_client = {client_id : [client_socket, client_address, name, password]}
-        new_client(client_id, name, password)
-        client_password = active_clients[client_id][3]
-    
-    if password == client_password:
-        client_socket.send(f"{CMD_ACK}|{name}\n".encode()) 
-        return True
-    else:
-        client_socket.send(f"{CMD_NACK}\n".encode())
-        client_socket.close()
-        return False
+            
 def do_clients(client_socket, parts):
     if parts[1] == CMD_ACTIVE:
         clients_text = get_active_clients()
@@ -103,19 +124,20 @@ def do_message(client_socket, client_id, parts):
             client_socket.send(f"{CMD_ACK}|{CMD_NACK}\n".encode())
 
 def handle_client(client_socket, client_address):
-    
-    if authenticate_key(client_socket, client_address) == False:
-        return
-    client_id = client_socket.recv(1024).decode().strip()
-    if authenticate(client_socket, client_address, client_id) == False:
-        return
+    client_id = None
+    try:
+        if authenticate_key(client_socket, client_address) == False:
+            return
 
-    offline_data = offline_message_read(client_id)
-    if offline_data != None:
-        client_socket.send(offline_data.encode())
+        client_id = authenticate(client_socket, client_address)
+        if not client_id:
+            return
 
-    while True:
-        try:
+        offline_data = offline_message_read(client_id)
+        if offline_data != None:
+            client_socket.send(offline_data.encode())
+
+        while True:
             data = client_socket.recv(8192).decode()
             if not data:
                 break
@@ -142,15 +164,14 @@ def handle_client(client_socket, client_address):
                 if command == CMD_MSG:
                     do_message(client_socket, client_id, parts)
                     continue
-        except ConnectionResetError:
-            print(f"Error handling client Connection reset: {client_id}")
-            break   
-        except Exception as e:
-            print(f"Error handling client {client_id}: {e}")
-            break   
-
-    active_clients.pop(client_id, None)
-    client_socket.close()
+    except (ConnectionResetError, ssl.SSLError) as e:
+        print(f"Connection error for client {client_id}: {e}")
+    except Exception as e:
+        print(f"Error handling client {client_id}: {e}")
+    finally:
+        if client_id:
+            active_clients.pop(client_id, None)
+        client_socket.close()
 
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
@@ -178,4 +199,4 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
             secure_socket.close()
             continue
         
-        threading.Thread(target=handle_client, args=(secure_socket, client_address)).start()
+        threading.Thread(target=handle_client, args=(secure_socket, client_address), daemon=True).start()

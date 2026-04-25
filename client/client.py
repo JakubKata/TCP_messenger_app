@@ -4,8 +4,7 @@ import rsa
 import threading
 import os
 from dotenv import load_dotenv
-from protocol import CMD_MSG, CMD_CLIENTS, CMD_ACK, CMD_NACK, CMD_SAVE, CMD_NEW, CMD_ACTIVE, CMD_ALL, CMD_PUBKEY, CMD_GETKEY, CMD_KEY
-from dotenv import load_dotenv
+from protocol import CMD_MSG, CMD_CLIENTS, CMD_ACK, CMD_NACK, CMD_SAVE, CMD_NEW, CMD_EXISTING, CMD_BUSY, CMD_ACTIVE, CMD_ALL, CMD_PUBKEY, CMD_GETKEY, CMD_KEY
 
 #.env
 load_dotenv()
@@ -41,8 +40,11 @@ def get_or_generate_keys(client_id):
 #functions
 def receive_messages(client_socket, private_key):
     while True:
-        data = client_socket.recv(8192).decode()
-        if not data:
+        try:
+            data = client_socket.recv(8192).decode()
+            if not data:
+                break
+        except (ConnectionResetError, ssl.SSLError, OSError):
             break
 
         messages = data.strip().split("\n")
@@ -70,7 +72,7 @@ def receive_messages(client_socket, private_key):
                     encrypted_bytes = bytes.fromhex(encrypted_hex)
                     decrypted_msg = rsa.decrypt(encrypted_bytes, private_key).decode()
                     print(f"Message from id:{sender_id} name:{sender_name}: {decrypted_msg}")
-                except Exception as e:
+                except Exception:
                     print("invalid private key")
 
             elif command == CMD_PUBKEY:
@@ -81,7 +83,6 @@ def receive_messages(client_socket, private_key):
             else:    
                 print(message)
                 
-
 def send_message(client_socket):
     while True:
         destination_id = input("Enter the destination client ID (ALL or 'ACTIVE' to see active clients): ")
@@ -102,32 +103,59 @@ def send_message(client_socket):
         encrypted_msg = rsa.encrypt(message.encode(), public_key).hex()
         client_socket.send(f"{CMD_MSG}|{destination_id}|{encrypted_msg}\n".encode())
         
-
 def authenticate(client_socket):
     client_socket.send(f"{key}\n".encode())
-    authention_response = client_socket.recv(1024).decode().strip()
-    if CMD_NACK == authention_response:
+    authentication_response = client_socket.recv(1024).decode().strip()
+    if CMD_NACK == authentication_response:
         return False
-    elif CMD_ACK == authention_response:
-        client_id = input("Enter your client ID: ")
-        client_socket.send(f"{client_id}\n".encode())
-        response = client_socket.recv(1024).decode().strip()
 
-        if response == CMD_NEW:
-            name = input("Enter your new name: ")
-            password = input("Enter your new password: ")
-            client_socket.send(f"{name}|{password}\n".encode())
-        else:
-            password = input("Enter your password: ")
-            client_socket.send(f"{password}\n".encode())
-        
-        response = client_socket.recv(1024).decode().strip()
-        if response.split("|")[0] == CMD_ACK:
-            name = response.split("|")[1]
-            return client_id
-        else:
-            print("Authentication failed.")
+    if CMD_ACK == authentication_response:
+
+        new_client = input("Are you a new client? (y/n): ").strip().lower()
+        if new_client not in ["y", "n"]:
+            print("Invalid input. Please enter 'y' or 'n'.")
             return False
+
+        while True:
+            if new_client == "y":
+                client_socket.send(f"{CMD_NEW}\n".encode())
+
+                client_id = input("Enter your client ID: ")
+                client_socket.send(f"{client_id}\n".encode())
+                response = client_socket.recv(1024).decode().strip()
+                if response == CMD_BUSY:
+                    print("Client ID is already in use. Please choose a different one.")
+                    continue
+
+                if response == CMD_ACK:
+                    name = input("Enter your new name: ")
+                    password = input("Enter your new password: ")
+                    client_socket.send(f"{name}|{password}\n".encode())
+                    if client_socket.recv(1024).decode().strip() == CMD_ACK:
+                        return client_id
+
+                print("Authentication failed.")
+                return False
+
+            elif new_client == "n":
+                client_socket.send(f"{CMD_EXISTING}\n".encode())
+
+                client_id = input("Enter your client ID: ")
+                password = input("Enter your password: ")
+                client_socket.send(f"{client_id}|{password}\n".encode())
+                response = client_socket.recv(1024).decode().strip()
+
+                if response.startswith(f"{CMD_ACK}|") or response == CMD_ACK:
+                    return client_id
+
+                if response == CMD_NACK:
+                    print("Invalid client ID or password. Please try again.")
+                    continue
+
+                print("Authentication failed.")
+                return False
+
+    return False
             
 while True:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
