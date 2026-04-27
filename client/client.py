@@ -1,182 +1,307 @@
 import socket
 import ssl
 import rsa
-import threading
 import os
 from dotenv import load_dotenv
+
+from PySide6.QtCore import QThread, Signal
 from protocol import CMD_MSG, CMD_CLIENTS, CMD_ACK, CMD_NACK, CMD_SAVE, CMD_NEW, CMD_EXISTING, CMD_BUSY, CMD_ACTIVE, CMD_ALL, CMD_PUBKEY, CMD_GETKEY, CMD_KEY
 
-#.env
-load_dotenv()
-ip = os.getenv("SERVER_IP")
-port = int(os.getenv("SERVER_PORT"))
-key = os.getenv("SECRET_KEY")
+class ChatClient(QThread):
+    # signals for GUI communication
+    signal_login_ok = Signal(str)           # client ID after successful login
+    signal_login_fail = Signal(str)         # error message after failed login
+    signal_new_msg = Signal(str, str, str)  # sender_id, sender_name, message
+    signal_clients_list = Signal(str, str)  # cmd_type, clients list
+    signal_system_msg = Signal(str)         # system message (e.g., message sent successfully)
 
-#tls
-context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-context.load_verify_locations("server.crt")
-context.check_hostname = False 
+    def __init__(self):
+        super().__init__()
 
-cached_public_key = {}
+        # .env
+        load_dotenv()
+        self.ip = os.getenv("SERVER_IP")
+        self.port = int(os.getenv("SERVER_PORT"))
+        self.key = os.getenv("SECRET_KEY")
 
-#rsa
-def get_or_generate_keys(client_id):
-    private_file = f"private_{client_id}.pem"
-    public_file = f"public_{client_id}.pem"
+        # tls
+        self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.context.load_verify_locations("server.crt")
+        self.context.check_hostname = False 
 
-    if os.path.exists(private_file):
-        with open(private_file, "rb") as f:
-            private_key = rsa.PrivateKey.load_pkcs1(f.read())
-        with open(public_file, "rb") as f:
-            public_key = rsa.PublicKey.load_pkcs1(f.read())
-    else:
-        public_key, private_key = rsa.newkeys(4096)
-        with open(private_file, "wb") as f:
-            f.write(private_key.save_pkcs1())
-        with open(public_file, "wb") as f:
-            f.write(public_key.save_pkcs1())
-    return public_key, private_key
+        self.socket = None
+        self.client_id = None
+        self.private_key = None
+        self.public_key = None
+        self.cached_public_key = {}
+        self.pending_public_keys = set()
+        self._recv_buffer = ""
+        self._intentional_disconnect = False
 
-#functions
-def receive_messages(client_socket, private_key):
-    while True:
+        self.is_running = True
+
+    def close_connection(self):
+        self._intentional_disconnect = True
+        self.is_running = False
+
+        if self.socket:
+            try:
+                self.socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self.socket.close()
+            except OSError:
+                pass
+            self.socket = None
+
+        if self.isRunning():
+            self.wait(1500)
+
+        self.pending_public_keys.clear()
+        self._recv_buffer = ""
+
+    def _recv_line(self):
+        while "\n" not in self._recv_buffer:
+            chunk = self.socket.recv(4096).decode()
+            if not chunk:
+                return None
+            self._recv_buffer += chunk
+
+        line, self._recv_buffer = self._recv_buffer.split("\n", 1)
+        return line.strip()
+
+    # rsa
+    def get_or_generate_keys(self, client_id):
+        private_file = f"private_{client_id}.pem"
+        public_file = f"public_{client_id}.pem"
+
+        if os.path.exists(private_file):
+            with open(private_file, "rb") as f:
+                private_key = rsa.PrivateKey.load_pkcs1(f.read())
+            with open(public_file, "rb") as f:
+                public_key = rsa.PublicKey.load_pkcs1(f.read())
+        else:
+            public_key, private_key = rsa.newkeys(1024)
+            with open(private_file, "wb") as f:
+                f.write(private_key.save_pkcs1())
+            with open(public_file, "wb") as f:
+                f.write(public_key.save_pkcs1())
+        return public_key, private_key
+
+    # handler functions
+    def connect_to_server(self):
         try:
-            data = client_socket.recv(8192).decode()
-            if not data:
-                break
-        except (ConnectionResetError, ssl.SSLError, OSError):
-            break
+            self.is_running = True
+            self._intentional_disconnect = False
+            self._recv_buffer = ""
+            self.pending_public_keys.clear()
 
-        messages = data.strip().split("\n")
-        for message in messages:
-            if not message.strip():
-                continue
-            parts = message.split("|")
-            command = parts[0]
-            
-            if command == CMD_ACK:
-                if parts[1] == CMD_ACK:
-                    print("Message sent successfully.")
-                elif parts[1] == CMD_SAVE:
-                    print("The destination client is offline. The message will be saved and delivered when the client comes online.")
-                elif parts[1] == CMD_NACK:
-                    print("Failed to send the message. The destination client is not existing.")
-                elif parts[1] == CMD_KEY:
-                    print("The key is in the database")
-
-            elif command == CMD_MSG:
-                sender_id = parts[1]
-                sender_name = parts[2]
-                encrypted_hex = parts[3]
+            if self.socket:
                 try:
-                    encrypted_bytes = bytes.fromhex(encrypted_hex)
-                    decrypted_msg = rsa.decrypt(encrypted_bytes, private_key).decode()
-                    print(f"Message from id:{sender_id} name:{sender_name}: {decrypted_msg}")
-                except Exception:
-                    print("invalid private key")
+                    self.socket.close()
+                except OSError:
+                    pass
 
-            elif command == CMD_PUBKEY:
-                target_id = parts[1]
-                public_key = parts[2].replace("~", "\n")
-                cached_public_key[target_id] = rsa.PublicKey.load_pkcs1(public_key.encode())
-
-            else:    
-                print(message)
-                
-def send_message(client_socket):
-    while True:
-        destination_id = input("Enter the destination client ID (ALL or 'ACTIVE' to see active clients): ")
-        if destination_id == CMD_ACTIVE:
-            client_socket.send(f"{CMD_CLIENTS}|{CMD_ACTIVE}\n".encode())
-            continue
-
-        if destination_id == CMD_ALL:
-            client_socket.send(f"{CMD_CLIENTS}|{CMD_ALL}\n".encode())
-            continue
-
-        if destination_id not in cached_public_key:
-            client_socket.send(f"{CMD_GETKEY}|{destination_id}\n".encode())
-            continue
-
-        message = input("Enter your message: ")
-        public_key = cached_public_key[destination_id]
-        encrypted_msg = rsa.encrypt(message.encode(), public_key).hex()
-        client_socket.send(f"{CMD_MSG}|{destination_id}|{encrypted_msg}\n".encode())
-        
-def authenticate(client_socket):
-    client_socket.send(f"{key}\n".encode())
-    authentication_response = client_socket.recv(1024).decode().strip()
-    if CMD_NACK == authentication_response:
-        return False
-
-    if CMD_ACK == authentication_response:
-
-        new_client = input("Are you a new client? (y/n): ").strip().lower()
-        if new_client not in ["y", "n"]:
-            print("Invalid input. Please enter 'y' or 'n'.")
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket = self.context.wrap_socket(client_socket, server_hostname=self.ip)
+            self.socket.connect((self.ip, self.port))
+            return True
+        except ConnectionRefusedError as e:
+            self.signal_system_msg.emit(f"Connection error: {e}")
+            return False
+        except socket.gaierror as e:
+            self.signal_system_msg.emit(f"Address error: {e}")
+            return False
+        except Exception as e:
+            self.signal_system_msg.emit(f"Unexpected error: {e}")
             return False
 
-        while True:
-            if new_client == "y":
-                client_socket.send(f"{CMD_NEW}\n".encode())
+    def authenticate_existing(self, client_id, password):
+        if not self.connect_to_server():
+            self.signal_login_fail.emit("Failed to connect to server.")
+            return False
 
-                client_id = input("Enter your client ID: ")
-                client_socket.send(f"{client_id}\n".encode())
-                response = client_socket.recv(1024).decode().strip()
-                if response == CMD_BUSY:
-                    print("Client ID is already in use. Please choose a different one.")
-                    continue
-
-                if response == CMD_ACK:
-                    name = input("Enter your new name: ")
-                    password = input("Enter your new password: ")
-                    client_socket.send(f"{name}|{password}\n".encode())
-                    if client_socket.recv(1024).decode().strip() == CMD_ACK:
-                        return client_id
-
-                print("Authentication failed.")
-                return False
-
-            elif new_client == "n":
-                client_socket.send(f"{CMD_EXISTING}\n".encode())
-
-                client_id = input("Enter your client ID: ")
-                password = input("Enter your password: ")
-                client_socket.send(f"{client_id}|{password}\n".encode())
-                response = client_socket.recv(1024).decode().strip()
-
-                if response.startswith(f"{CMD_ACK}|") or response == CMD_ACK:
-                    return client_id
-
-                if response == CMD_NACK:
-                    print("Invalid client ID or password. Please try again.")
-                    continue
-
-                print("Authentication failed.")
-                return False
-
-    return False
-            
-while True:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-        try:
-            secure_socket = context.wrap_socket(client_socket, server_hostname=ip)
-            secure_socket.connect((ip, port))
-        except ConnectionRefusedError as e:
-            print(f"Connection error: {e}")
-            break
-        except socket.gaierror as e:
-            print(f"Address error: {e}")
-            break
+        self.socket.sendall(f"{self.key}\n".encode())
+        authentication_response = self._recv_line()
         
-        client_id = authenticate(secure_socket) 
+        if authentication_response == CMD_NACK:
+            self.signal_login_fail.emit("Invalid server key.")
+            return False
 
-        if client_id:
-            public_key, private_key = get_or_generate_keys(client_id)
-            public_key_str = public_key.save_pkcs1().decode().replace("\n", "~")
-            secure_socket.send(f"{CMD_PUBKEY}|{public_key_str}\n".encode())
+        if authentication_response == CMD_ACK:
+            self.socket.sendall(f"{CMD_EXISTING}\n".encode())
+            self.socket.sendall(f"{client_id}|{password}\n".encode())
+            response = self._recv_line()
 
-            threading.Thread(target=receive_messages, args=(secure_socket, private_key), daemon=True).start()
-            send_message(secure_socket)
-        else:
-            secure_socket.close()
+            if response is None:
+                self.signal_login_fail.emit("Connection closed during login.")
+                return False
+
+            if response.startswith(f"{CMD_ACK}|") or response == CMD_ACK:
+                self.client_id = client_id
+                self.public_key, self.private_key = self.get_or_generate_keys(client_id)
+                public_key_str = self.public_key.save_pkcs1().decode().replace("\n", "~")
+                self.socket.sendall(f"{CMD_PUBKEY}|{public_key_str}\n".encode())
+                
+                self.signal_login_ok.emit(client_id)
+                if not self.isRunning():
+                    self.start() # start receive_messages in the background
+                return True
+
+            if response == CMD_NACK:
+                self.signal_login_fail.emit("Invalid client ID or password. Please try again.")
+                return False
+
+        self.signal_login_fail.emit("Authentication failed.")
+        return False
+
+    def authenticate_new(self, client_id, name, password):
+        if not self.connect_to_server():
+            self.signal_login_fail.emit("Failed to connect to server.")
+            return False
+
+        self.socket.sendall(f"{self.key}\n".encode())
+        authentication_response = self._recv_line()
+        
+        if authentication_response == CMD_NACK:
+            self.signal_login_fail.emit("Invalid server key.")
+            return False
+
+        if authentication_response == CMD_ACK:
+            self.socket.sendall(f"{CMD_NEW}\n".encode())
+            self.socket.sendall(f"{client_id}\n".encode())
+            response = self._recv_line()
+
+            if response is None:
+                self.signal_login_fail.emit("Connection closed during registration.")
+                return False
+            
+            if response == CMD_BUSY:
+                self.signal_login_fail.emit("Client ID is already in use. Please choose a different one.")
+                return False
+
+            if response == CMD_ACK:
+                self.socket.sendall(f"{name}|{password}\n".encode())
+                register_response = self._recv_line()
+                if register_response == CMD_ACK:
+                    self.client_id = client_id
+                    self.public_key, self.private_key = self.get_or_generate_keys(client_id)
+                    public_key_str = self.public_key.save_pkcs1().decode().replace("\n", "~")
+                    self.socket.sendall(f"{CMD_PUBKEY}|{public_key_str}\n".encode())
+                    
+                    self.signal_login_ok.emit(client_id)
+                    if not self.isRunning():
+                        self.start() # start receive_messages in the background
+                    return True
+
+        self.signal_login_fail.emit("Authentication failed.")
+        return False
+
+    def request_clients(self, cmd_type):
+        if self.socket:
+            try:
+                self.socket.sendall(f"{CMD_CLIENTS}|{cmd_type}\n".encode())
+            except OSError as e:
+                self.signal_system_msg.emit(f"Connection error: {e}")
+
+    def request_public_key(self, target_id, notify=False):
+        if not self.socket or not target_id:
+            return False
+        if target_id in self.cached_public_key or target_id in self.pending_public_keys:
+            return True
+        try:
+            self.socket.sendall(f"{CMD_GETKEY}|{target_id}\n".encode())
+            self.pending_public_keys.add(target_id)
+            if notify:
+                self.signal_system_msg.emit(f"Fetching key for {target_id}... Please wait a moment and send again.")
+            return True
+        except OSError as e:
+            self.signal_system_msg.emit(f"Connection error: {e}")
+            return False
+
+    def send_chat_message(self, destination_id, message):
+        if not self.socket:
+            self.signal_system_msg.emit("Not connected to server.")
+            return
+
+        if destination_id not in self.cached_public_key:
+            self.request_public_key(destination_id, notify=True)
+            return
+
+        public_key = self.cached_public_key[destination_id]
+        try:
+            encrypted_msg = rsa.encrypt(message.encode(), public_key).hex()
+            self.socket.sendall(f"{CMD_MSG}|{destination_id}|{encrypted_msg}\n".encode())
+        except Exception as e:
+            self.signal_system_msg.emit(f"Encryption error: {e}")
+
+    def run(self):
+        buffer = self._recv_buffer
+        self._recv_buffer = ""
+        while self.is_running and self.socket:
+            try:
+                data = self.socket.recv(8192).decode()
+                if not data:
+                    break
+            except (ConnectionResetError, ssl.SSLError, OSError) as e:
+                if not self._intentional_disconnect:
+                    self.signal_system_msg.emit(f"Connection lost: {e}")
+                break
+
+            buffer += data
+            messages = buffer.split("\n")
+            buffer = messages.pop()
+            for message in messages:
+                if not message.strip():
+                    continue
+                parts = message.split("|")
+                command = parts[0]
+                
+                if command == CMD_ACK:
+                    if len(parts) < 2:
+                        self.signal_system_msg.emit("Server response was malformed.")
+                        continue
+                    if parts[1] == CMD_ACK:
+                        self.signal_system_msg.emit("Message sent successfully.")
+                    elif parts[1] == CMD_SAVE:
+                        self.signal_system_msg.emit("The destination client is offline. The message will be saved and delivered when the client comes online.")
+                    elif parts[1] == CMD_NACK:
+                        self.signal_system_msg.emit("Failed to send the message. The destination client is not existing.")
+                    elif parts[1] == CMD_KEY:
+                        self.signal_system_msg.emit("The key is in the database.")
+
+                elif command == CMD_MSG:
+                    if len(parts) < 4:
+                        self.signal_system_msg.emit("Incoming message was malformed.")
+                        continue
+                    sender_id = parts[1]
+                    sender_name = parts[2]
+                    encrypted_hex = "|".join(parts[3:])
+                    try:
+                        encrypted_bytes = bytes.fromhex(encrypted_hex)
+                        decrypted_msg = rsa.decrypt(encrypted_bytes, self.private_key).decode()
+                        self.signal_new_msg.emit(sender_id, sender_name, decrypted_msg)
+                    except Exception:
+                        self.signal_system_msg.emit("invalid private key")
+
+                elif command == CMD_PUBKEY:
+                    if len(parts) < 3:
+                        self.signal_system_msg.emit("Received malformed public key response.")
+                        continue
+                    target_id = parts[1]
+                    public_key = parts[2].replace("~", "\n")
+                    self.cached_public_key[target_id] = rsa.PublicKey.load_pkcs1(public_key.encode())
+                    self.pending_public_keys.discard(target_id)
+                    self.signal_system_msg.emit(f"Received public key for client: {target_id}")
+
+                elif command in [CMD_ALL, CMD_ACTIVE]:
+                    # server sends: CMD_ACTIVE | id, name | id, name |
+                    clients_text = "|".join(parts[1:])
+                    self.signal_clients_list.emit(command, clients_text)
+
+                else:    
+                    self.signal_system_msg.emit(message)
+
+        self.socket = None
+        self._intentional_disconnect = False

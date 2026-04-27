@@ -7,22 +7,22 @@ from database import init_db, get_client, new_client, offline_message_save, offl
 from protocol import CMD_MSG, CMD_CLIENTS, CMD_ACK, CMD_NACK, CMD_SAVE, CMD_NEW, CMD_EXISTING, CMD_BUSY, CMD_ACTIVE, CMD_ALL, CMD_PUBKEY, CMD_GETKEY, CMD_KEY
 from dotenv import load_dotenv
 
-#.env
+# .env
 load_dotenv()
 ip = os.getenv("SERVER_IP")
 port = int(os.getenv("SERVER_PORT"))
 key = os.getenv("SECRET_KEY")
 
-#.jsom
+# .jsom
 with open("config.json", "r",encoding="utf-8") as f:
     config = json.load(f)
 
-#tls
+# tls
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(certfile="server.crt", keyfile="server.key")
 
 init_db()
-active_clients = {} #active_client = {client_id : [client_socket, client_address, name, password]}
+active_clients = {} # active_client = {client_id : [client_socket, client_address, name, password]}
 
 def get_active_clients():
     active_clients_text = ""
@@ -58,7 +58,7 @@ def authenticate(client_socket, client_address):
                     return False
                 name, password = response.split("|", 1)
                 new_client(client_id, name, password)
-                active_clients[client_id] = [client_socket, client_address, name, password] #active_client = {client_id : [client_socket, client_address, name, password]}
+                active_clients[client_id] = [client_socket, client_address, name, password] # active_client = {client_id : [client_socket, client_address, name, password]}
                 client_socket.send(f"{CMD_ACK}\n".encode())
                 return client_id
             
@@ -79,7 +79,7 @@ def authenticate(client_socket, client_address):
                 client_socket.send(f"{CMD_NACK}\n".encode())
                 continue
 
-            active_clients[client_id] = [client_socket, client_address, *client] #active_client = {client_id : [client_socket, client_address, name, password]}
+            active_clients[client_id] = [client_socket, client_address, *client] # active_client = {client_id : [client_socket, client_address, name, password]}
             name = active_clients[client_id][2]
             client_socket.send(f"{CMD_ACK}|{name}\n".encode()) 
             return client_id
@@ -90,38 +90,47 @@ def authenticate(client_socket, client_address):
 def do_clients(client_socket, parts):
     if parts[1] == CMD_ACTIVE:
         clients_text = get_active_clients()
-        client_socket.send(f"{clients_text}\n".encode())
+        client_socket.sendall(f"{CMD_ACTIVE}|{clients_text}\n".encode())
     elif parts[1] == CMD_ALL:
         clients_text = get_ready_clients()
-        client_socket.send(f"{clients_text}\n".encode())
+        client_socket.sendall(f"{CMD_ALL}|{clients_text}\n".encode())
 
 def do_public_key(client_socket, client_id, parts):
+    if len(parts) < 2:
+        client_socket.sendall(f"{CMD_ACK}|{CMD_NACK}\n".encode())
+        return
     public_key = parts[1]
     update_public_key(client_id, public_key)
-    client_socket.send(f"{CMD_ACK}|{CMD_KEY}\n".encode())
+    client_socket.sendall(f"{CMD_ACK}|{CMD_KEY}\n".encode())
 
 def do_get_key(client_socket, parts):
+    if len(parts) < 2:
+        client_socket.sendall(f"{CMD_ACK}|{CMD_NACK}\n".encode())
+        return
     target_id = parts[1]
     public_key = get_public_key(target_id)
     if public_key != None:
-        client_socket.send(f"{CMD_PUBKEY}|{target_id}|{public_key}\n".encode())
+        client_socket.sendall(f"{CMD_PUBKEY}|{target_id}|{public_key}\n".encode())
     else:
-        client_socket.send(f"{CMD_ACK}|{CMD_NACK}\n".encode())
+        client_socket.sendall(f"{CMD_ACK}|{CMD_NACK}\n".encode())
 
 def do_message(client_socket, client_id, parts):
+    if len(parts) < 3:
+        client_socket.sendall(f"{CMD_ACK}|{CMD_NACK}\n".encode())
+        return
     destination_id = parts[1]
-    message = parts[2]
+    message = "|".join(parts[2:])
     sender_name = active_clients[client_id][2]
     if destination_id in active_clients:
-        active_clients[destination_id][0].send(f"{CMD_MSG}|{client_id}|{sender_name}|{message}\n".encode())
-        client_socket.send(f"{CMD_ACK}|{CMD_ACK}\n".encode())
+        active_clients[destination_id][0].sendall(f"{CMD_MSG}|{client_id}|{sender_name}|{message}\n".encode())
+        client_socket.sendall(f"{CMD_ACK}|{CMD_ACK}\n".encode())
     else:
         if is_existing_client(destination_id):
-            client_socket.send(f"{CMD_ACK}|{CMD_SAVE}\n".encode())
+            client_socket.sendall(f"{CMD_ACK}|{CMD_SAVE}\n".encode())
             sender_name = active_clients[client_id][2]
             offline_message_save(destination_id, client_id, sender_name, message)
         else:                       
-            client_socket.send(f"{CMD_ACK}|{CMD_NACK}\n".encode())
+            client_socket.sendall(f"{CMD_ACK}|{CMD_NACK}\n".encode())
 
 def handle_client(client_socket, client_address):
     client_id = None
@@ -135,14 +144,17 @@ def handle_client(client_socket, client_address):
 
         offline_data = offline_message_read(client_id)
         if offline_data != None:
-            client_socket.send(offline_data.encode())
+            client_socket.sendall(offline_data.encode())
 
+        buffer = ""
         while True:
             data = client_socket.recv(8192).decode()
             if not data:
                 break
 
-            messages = data.split("\n")
+            buffer += data
+            messages = buffer.split("\n")
+            buffer = messages.pop()
             for response in messages:
                 if not response.strip(): 
                     continue
@@ -150,6 +162,9 @@ def handle_client(client_socket, client_address):
                 parts = response.split("|")
                 command = parts[0]
                 if command == CMD_CLIENTS:
+                    if len(parts) < 2:
+                        client_socket.sendall(f"{CMD_ACK}|{CMD_NACK}\n".encode())
+                        continue
                     do_clients(client_socket, parts)
                     continue
                 
@@ -164,6 +179,8 @@ def handle_client(client_socket, client_address):
                 if command == CMD_MSG:
                     do_message(client_socket, client_id, parts)
                     continue
+
+                client_socket.sendall(f"{CMD_ACK}|{CMD_NACK}\n".encode())
     except (ConnectionResetError, ssl.SSLError) as e:
         print(f"Connection error for client {client_id}: {e}")
     except Exception as e:

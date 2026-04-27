@@ -1,4 +1,4 @@
-#database.py
+# database.py
 import sqlite3
 from protocol import CMD_MSG
 
