@@ -33,10 +33,10 @@ def get_active_clients():
 def authenticate_key(client_socket, client_address): 
     client_key = client_socket.recv(1024).decode().strip()
     if client_key != key:
-        client_socket.send(f"{CMD_NACK}\n".encode())
+        client_socket.sendall(f"{CMD_NACK}\n".encode())
         return False
     else:
-        client_socket.send(f"{CMD_ACK}\n".encode())
+        client_socket.sendall(f"{CMD_ACK}\n".encode())
         return True
        
 def authenticate(client_socket, client_address):
@@ -45,46 +45,46 @@ def authenticate(client_socket, client_address):
         if mode == CMD_NEW:
             client_id = client_socket.recv(1024).decode().strip()
             if not client_id:
-                client_socket.send(f"{CMD_NACK}\n".encode())
+                client_socket.sendall(f"{CMD_NACK}\n".encode())
                 return False
 
             if is_existing_client(client_id):
-                client_socket.send(f"{CMD_BUSY}\n".encode())
+                client_socket.sendall(f"{CMD_BUSY}\n".encode())
                 continue
             else:
-                client_socket.send(f"{CMD_ACK}\n".encode())
+                client_socket.sendall(f"{CMD_ACK}\n".encode())
                 response = client_socket.recv(1024).decode().strip()
                 if not response or "|" not in response:
                     return False
                 name, password = response.split("|", 1)
                 new_client(client_id, name, password)
                 active_clients[client_id] = [client_socket, client_address, name, password] # active_client = {client_id : [client_socket, client_address, name, password]}
-                client_socket.send(f"{CMD_ACK}\n".encode())
+                client_socket.sendall(f"{CMD_ACK}\n".encode())
                 return client_id
             
         elif mode == CMD_EXISTING:
             response = client_socket.recv(1024).decode().strip()
             if not response or "|" not in response:
-                client_socket.send(f"{CMD_NACK}\n".encode())
+                client_socket.sendall(f"{CMD_NACK}\n".encode())
                 continue
 
             client_id, client_password = response.split("|", 1)
             if not is_existing_client(client_id):
-                client_socket.send(f"{CMD_NACK}\n".encode())
+                client_socket.sendall(f"{CMD_NACK}\n".encode())
                 continue
 
             client = get_client(client_id)
             password = client[1]
             if password != client_password:
-                client_socket.send(f"{CMD_NACK}\n".encode())
+                client_socket.sendall(f"{CMD_NACK}\n".encode())
                 continue
 
             active_clients[client_id] = [client_socket, client_address, *client] # active_client = {client_id : [client_socket, client_address, name, password]}
             name = active_clients[client_id][2]
-            client_socket.send(f"{CMD_ACK}|{name}\n".encode()) 
+            client_socket.sendall(f"{CMD_ACK}|{name}\n".encode()) 
             return client_id
         else:
-            client_socket.send(f"{CMD_NACK}\n".encode())
+            client_socket.sendall(f"{CMD_NACK}\n".encode())
             return False
             
 def do_clients(client_socket, parts):
