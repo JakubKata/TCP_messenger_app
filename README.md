@@ -1,6 +1,6 @@
 # Project Messenger
 
-Project Messenger is a small, secure client–server messenger written in Python. It uses TLS for transport security and RSA for end-to-end message encryption between clients. The repository contains a server and a client application with a lightweight GUI.
+Project Messenger is a small, secure client-server messenger written in Python. It uses TLS for transport security and RSA for end-to-end message encryption between clients. The repository contains a server and a client application with a lightweight GUI.
 
 Supported scenarios:
 
@@ -28,7 +28,7 @@ Supported scenarios:
 - Python 3.8 or newer
 - A virtual environment (recommended)
 - Required Python packages: `PySide6`, `rsa`, `python-dotenv` (see `requirements.txt`)
-- OpenSSL (optional — used by `generate_cert.py` to create self-signed certificates)
+- OpenSSL (optional - used by `generate_cert.py` to create self-signed certificates)
 
 The project is licensed under the MIT License (see `LICENSE`).
 
